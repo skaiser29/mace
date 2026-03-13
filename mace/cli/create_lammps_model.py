@@ -42,6 +42,26 @@ def parse_args():
         help="Old libtorch format, or new mliap format",
         default="libtorch",
     )
+    parser.add_argument(
+        "--total-charge",
+        type=float,
+        default=0.0,
+        help="Fixed total charge to embed in the exported LAMMPS wrapper",
+    )
+    parser.add_argument(
+        "--total-spin",
+        type=float,
+        default=1.0,
+        help="Fixed total spin to embed in the exported LAMMPS wrapper",
+    )
+    parser.add_argument(
+        "--external-field",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar=("EX", "EY", "EZ"),
+        help="Fixed uniform external field to embed in the exported LAMMPS wrapper",
+    )
     return parser.parse_args()
 
 
@@ -100,9 +120,17 @@ def main():
         )
 
     lammps_class = LAMMPS_MLIAP_MACE if args.format == "mliap" else LAMMPS_MACE
-    lammps_model = (
-        lammps_class(model, head=head) if head is not None else lammps_class(model)
-    )
+    wrapper_kwargs = {
+        "total_charge": torch.tensor([args.total_charge], dtype=model.r_max.dtype),
+        "total_spin": torch.tensor([args.total_spin], dtype=model.r_max.dtype),
+    }
+    if args.external_field is not None:
+        wrapper_kwargs["external_field"] = torch.tensor(
+            [args.external_field], dtype=model.r_max.dtype
+        )
+    if head is not None:
+        wrapper_kwargs["head"] = head
+    lammps_model = lammps_class(model, **wrapper_kwargs)
     if args.format == "mliap":
         torch.save(lammps_model, model_path + "-mliap_lammps.pt")
     else:
