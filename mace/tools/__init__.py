@@ -1,37 +1,10 @@
-from .arg_parser import build_default_arg_parser, build_preprocess_arg_parser
-from .arg_parser_tools import check_args
-from .cg import U_matrix_real
-from .checkpoint import CheckpointHandler, CheckpointIO, CheckpointState
-from .default_keys import DefaultKeys
-from .finetuning_utils import load_foundations, load_foundations_elements
-from .torch_tools import (
-    TensorDict,
-    cartesian_to_spherical,
-    count_parameters,
-    init_device,
-    init_wandb,
-    set_default_dtype,
-    set_seeds,
-    spherical_to_cartesian,
-    to_numpy,
-    to_one_hot,
-    voigt_to_matrix,
-)
-from .train import SWAContainer, evaluate, train
-from .utils import (
-    AtomicNumberTable,
-    MetricsLogger,
-    atomic_numbers_to_indices,
-    compute_c,
-    compute_mae,
-    compute_q95,
-    compute_rel_mae,
-    compute_rel_rmse,
-    compute_rmse,
-    get_atomic_number_table_from_zs,
-    get_tag,
-    setup_logger,
-)
+"""Lazy tool exports.
+
+Avoid importing training/foundation utilities during lightweight runtime use
+cases such as embedded LAMMPS model loading.
+"""
+
+from importlib import import_module
 
 __all__ = [
     "TensorDict",
@@ -71,3 +44,58 @@ __all__ = [
     "load_foundations_elements",
     "build_preprocess_arg_parser",
 ]
+
+_ATTR_MODULES = {
+    "build_default_arg_parser": ".arg_parser",
+    "build_preprocess_arg_parser": ".arg_parser",
+    "check_args": ".arg_parser_tools",
+    "U_matrix_real": ".cg",
+    "CheckpointHandler": ".checkpoint",
+    "CheckpointIO": ".checkpoint",
+    "CheckpointState": ".checkpoint",
+    "DefaultKeys": ".default_keys",
+    "load_foundations": ".finetuning_utils",
+    "load_foundations_elements": ".finetuning_utils",
+    "TensorDict": ".torch_tools",
+    "cartesian_to_spherical": ".torch_tools",
+    "count_parameters": ".torch_tools",
+    "init_device": ".torch_tools",
+    "init_wandb": ".torch_tools",
+    "set_default_dtype": ".torch_tools",
+    "set_seeds": ".torch_tools",
+    "spherical_to_cartesian": ".torch_tools",
+    "to_numpy": ".torch_tools",
+    "to_one_hot": ".torch_tools",
+    "voigt_to_matrix": ".torch_tools",
+    "SWAContainer": ".train",
+    "evaluate": ".train",
+    "train": ".train",
+    "AtomicNumberTable": ".utils",
+    "MetricsLogger": ".utils",
+    "atomic_numbers_to_indices": ".utils",
+    "compute_c": ".utils",
+    "compute_mae": ".utils",
+    "compute_q95": ".utils",
+    "compute_rel_mae": ".utils",
+    "compute_rel_rmse": ".utils",
+    "compute_rmse": ".utils",
+    "get_atomic_number_table_from_zs": ".utils",
+    "get_tag": ".utils",
+    "setup_logger": ".utils",
+}
+
+_MODULE_EXPORTS = {
+    "torch_geometric": ".torch_geometric",
+    "torch_tools": ".torch_tools",
+    "utils": ".utils",
+}
+
+
+def __getattr__(name):
+    module_name = _ATTR_MODULES.get(name)
+    if module_name is not None:
+        return getattr(import_module(module_name, __name__), name)
+    module_name = _MODULE_EXPORTS.get(name)
+    if module_name is not None:
+        return import_module(module_name, __name__)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

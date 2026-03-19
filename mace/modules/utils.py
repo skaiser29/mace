@@ -512,19 +512,28 @@ def compute_total_charge_dipole_permuted(
 ):
     dipole_contribution = positions * density_coefficients[:, :1]
 
-    dipole = scatter_sum(
-        src=dipole_contribution, index=batch.unsqueeze(-1), dim=0, dim_size=num_graphs
-    )
+    if num_graphs == 1:
+        dipole = dipole_contribution.sum(dim=0).unsqueeze(0)
+    else:
+        dipole = scatter_sum(
+            src=dipole_contribution, index=batch.unsqueeze(-1), dim=0, dim_size=num_graphs
+        )
 
     if density_coefficients.shape[1] > 1:
-        dipole_p = scatter_sum(
-            src=density_coefficients[..., 1:4], index=batch, dim=-2, dim_size=num_graphs
-        )
+        if num_graphs == 1:
+            dipole_p = density_coefficients[..., 1:4].sum(dim=0).unsqueeze(0)
+        else:
+            dipole_p = scatter_sum(
+                src=density_coefficients[..., 1:4], index=batch, dim=-2, dim_size=num_graphs
+            )
         dipole = dipole + dipole_p[..., [2, 0, 1]]  # CS phase convention
 
-    total_charge = scatter_sum(
-        src=density_coefficients[:, 0], index=batch, dim=-1  # , dim_size=num_graphs
-    )
+    if num_graphs == 1:
+        total_charge = density_coefficients[:, 0].sum(dim=0).unsqueeze(0)
+    else:
+        total_charge = scatter_sum(
+            src=density_coefficients[:, 0], index=batch, dim=-1  # , dim_size=num_graphs
+        )
 
     return total_charge, dipole
 

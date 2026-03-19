@@ -176,6 +176,7 @@ class AgnosticChargeBiasedLinearPotentialEmbedding(
         node_feats: torch.Tensor,
         node_attrs: torch.Tensor,
         local_charges: torch.Tensor,
+        node_feats_emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:  # pylint: disable=arguments-differ
         potential_to_mul_ir = getattr(self, "_potential_to_mul_ir", None)
         node_feats_to_mul_ir = getattr(self, "_node_feats_to_mul_ir", None)
@@ -193,14 +194,28 @@ class AgnosticChargeBiasedLinearPotentialEmbedding(
             charges_in = charges_to_mul_ir(charges_in)
 
         potential_emb = self.potential_linear(potential_in)
-        node_feats_emb = self.node_feats_linear(node_feats_in)
+        if node_feats_emb is None:
+            node_feats_emb = self.node_feats_linear(node_feats_in)
+            if node_feats_from_mul_ir is not None:
+                node_feats_emb = node_feats_from_mul_ir(node_feats_emb)
         charges_emb = self.charge_embedding(charges_in)
         if node_feats_from_mul_ir is not None:
             potential_emb = node_feats_from_mul_ir(potential_emb)
-            node_feats_emb = node_feats_from_mul_ir(node_feats_emb)
             charges_emb = node_feats_from_mul_ir(charges_emb)
 
         return potential_emb + node_feats_emb + charges_emb
+
+    def prepare_static_node_feats(self, node_feats: torch.Tensor) -> torch.Tensor:
+        node_feats_to_mul_ir = getattr(self, "_node_feats_to_mul_ir", None)
+        node_feats_from_mul_ir = getattr(self, "_node_feats_from_mul_ir", None)
+
+        node_feats_in = node_feats
+        if node_feats_to_mul_ir is not None:
+            node_feats_in = node_feats_to_mul_ir(node_feats_in)
+        node_feats_emb = self.node_feats_linear(node_feats_in)
+        if node_feats_from_mul_ir is not None:
+            node_feats_emb = node_feats_from_mul_ir(node_feats_emb)
+        return node_feats_emb
 
 
 @compile_mode("script")
@@ -402,6 +417,38 @@ class SparseUvuTensorProduct(torch.nn.Module):
             )
             w_offset += w_size
 
+        self._scalar_one_path_fast_meta: Optional[
+            Tuple[int, int, int, int, int, int, int, int, float]
+        ] = None
+        if len(self._path_meta) == 1:
+            (
+                in1_start,
+                in1_stop,
+                in2_start,
+                in2_stop,
+                out_start,
+                out_stop,
+                w_start,
+                w_stop,
+                path_weight,
+                _mode_code,
+                mul1,
+                mul2,
+                d1,
+            ) = self._path_meta[0]
+            if d1 == 1 and (in1_stop - in1_start) == mul1 and (in2_stop - in2_start) == mul2:
+                self._scalar_one_path_fast_meta = (
+                    in1_start,
+                    in1_stop,
+                    in2_start,
+                    in2_stop,
+                    out_start,
+                    out_stop,
+                    w_start,
+                    w_stop,
+                    path_weight,
+                )
+
     def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
         if x1.ndim != 2 or x2.ndim != 2:
             raise ValueError(
@@ -409,6 +456,57 @@ class SparseUvuTensorProduct(torch.nn.Module):
             )
 
         batch = x1.shape[0]
+        fast_meta = getattr(self, "_scalar_one_path_fast_meta", None)
+        if fast_meta is None and len(self._path_meta) == 1:
+            (
+                in1_start,
+                in1_stop,
+                in2_start,
+                in2_stop,
+                out_start,
+                out_stop,
+                w_start,
+                w_stop,
+                path_weight,
+                _mode_code,
+                mul1,
+                mul2,
+                d1,
+            ) = self._path_meta[0]
+            if d1 == 1 and (in1_stop - in1_start) == mul1 and (in2_stop - in2_start) == mul2:
+                fast_meta = (
+                    in1_start,
+                    in1_stop,
+                    in2_start,
+                    in2_stop,
+                    out_start,
+                    out_stop,
+                    w_start,
+                    w_stop,
+                    path_weight,
+                )
+                self._scalar_one_path_fast_meta = fast_meta
+        if fast_meta is not None:
+            (
+                in1_start,
+                in1_stop,
+                in2_start,
+                in2_stop,
+                out_start,
+                out_stop,
+                w_start,
+                w_stop,
+                path_weight,
+            ) = fast_meta
+            out = x1.new_zeros((batch, self.irreps_out.dim))
+            x1_block = x1[:, in1_start:in1_stop]
+            x2_block = x2[:, in2_start:in2_stop]
+            w = self.weight[w_start:w_stop].view(in1_stop - in1_start, in2_stop - in2_start)
+            out[:, out_start:out_stop] = path_weight * x1_block * torch.nn.functional.linear(
+                x2_block, w
+            )
+            return out * self.output_mask
+
         out = x1.new_zeros((batch, self.irreps_out.dim))
 
         def to_mul_ir(block: torch.Tensor, mul: int, dim: int) -> torch.Tensor:
@@ -569,6 +667,8 @@ class AgnosticEmbeddedOneBodyVariableUpdate(FieldUpdateBlock):
         edge_index: torch.Tensor,
         potential_features: torch.Tensor,
         local_charges: torch.Tensor,
+        source_embedding: Optional[torch.Tensor] = None,
+        node_feats_emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # create pot feats
         mixed_feats = self.potential_embedding(
@@ -576,9 +676,11 @@ class AgnosticEmbeddedOneBodyVariableUpdate(FieldUpdateBlock):
             node_feats,
             node_attrs,
             local_charges,
+            node_feats_emb=node_feats_emb,
         )
         invariant_descriptors = self.dot_products(node_feats, mixed_feats)
-        source_embedding = self.source_embedding(node_attrs)
+        if source_embedding is None:
+            source_embedding = self.source_embedding(node_attrs)
         invariant_descriptors_embedded = torch.cat(
             [invariant_descriptors, source_embedding], dim=-1
         )
@@ -592,6 +694,16 @@ class AgnosticEmbeddedOneBodyVariableUpdate(FieldUpdateBlock):
         if readout_from_mul_ir is not None:
             multipoles = readout_from_mul_ir(multipoles)
         return multipoles
+
+    def prepare_static(
+        self,
+        node_attrs: torch.Tensor,
+        node_feats: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return (
+            self.source_embedding(node_attrs),
+            self.potential_embedding.prepare_static_node_feats(node_feats),
+        )
 
 
 class PostScfReadout(torch.nn.Module):
