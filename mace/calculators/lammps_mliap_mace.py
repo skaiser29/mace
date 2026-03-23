@@ -411,7 +411,7 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
                                 batch,
                                 training=False,
                                 compute_force=True,
-                                compute_virials=False,
+                                compute_virials=True,
                                 compute_stress=False,
                                 compute_displacement=False,
                             )
@@ -422,21 +422,24 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
                                 out["forces"],
                                 owned_indices_per_rank,
                             )
+                            global_virial = self._extract_global_polar_virial(out)
                         else:
                             atom_energies, atom_forces = self._scatter_polar_outputs(
                                 comm, rank, None, None, None
                             )
+                            global_virial = None
                     else:
                         out = self.model(
                             batch,
                             training=False,
                             compute_force=True,
-                            compute_virials=False,
+                            compute_virials=True,
                             compute_stress=False,
                             compute_displacement=False,
                         )
                         atom_energies = out["node_energy"].index_select(0, owned_indices)
                         atom_forces = out["forces"].index_select(0, owned_indices)
+                        global_virial = self._extract_global_polar_virial(out)
 
                     if self.device.type != "cpu" and (
                         self.config.debug_time or self.config.debug_profile
@@ -444,7 +447,9 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
                         torch.cuda.synchronize()
 
                 with timer("update_lammps", enabled=self.config.debug_time):
-                    self._update_lammps_polar(data, atom_energies, atom_forces)
+                    self._update_lammps_polar(
+                        data, atom_energies, atom_forces, global_virial
+                    )
             else:
                 if npairs <= 1:
                     return
@@ -739,9 +744,42 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
         data.energy = atom_energies_real.sum().item()
         data.update_pair_forces(pair_forces)
 
-    def _update_lammps_polar(self, data, atom_energies, atom_forces):
+    def _extract_global_polar_virial(self, out):
+        virials = out.get("virials")
+        if virials is None:
+            return None
+        virials = virials.detach().to(dtype=torch.float64)
+        if virials.ndim == 3:
+            if virials.shape[0] != 1:
+                raise ValueError(
+                    f"Expected one graph virial tensor, got shape {tuple(virials.shape)}"
+                )
+            virials = virials[0]
+        elif virials.ndim != 2:
+            raise ValueError(f"Unexpected virial tensor shape {tuple(virials.shape)}")
+        virials = 0.5 * (virials + virials.transpose(0, 1))
+        return torch.stack(
+            [
+                virials[0, 0],
+                virials[1, 1],
+                virials[2, 2],
+                virials[0, 1],
+                virials[0, 2],
+                virials[1, 2],
+            ]
+        )
+
+    def _update_lammps_polar(
+        self, data, atom_energies, atom_forces, global_virial=None
+    ):
         atom_energies_real = atom_energies.detach().to(dtype=torch.float64)
         atom_forces_real = atom_forces.detach().to(dtype=torch.float64)
+        global_virial_host = None
+        if global_virial is not None:
+            if torch.is_tensor(global_virial):
+                global_virial_host = global_virial.detach().cpu().numpy()
+            else:
+                global_virial_host = np.asarray(global_virial, dtype=np.float64)
         force_array = data.f
         eatoms_array = data.eatoms
         if (
@@ -762,9 +800,13 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
                 atom_forces_real.cpu().numpy()
             )
             data.energy = float(atom_energies_real.sum().item())
+            if global_virial_host is not None and hasattr(data, "update_global_virial"):
+                data.update_global_virial(global_virial_host)
             return
         data.update_atom_energy(atom_energies_real)
         data.update_atom_forces(atom_forces_real)
+        if global_virial_host is not None and hasattr(data, "update_global_virial"):
+            data.update_global_virial(global_virial_host)
 
     def _manage_profiling(self):
         if not self.config.debug_profile:
